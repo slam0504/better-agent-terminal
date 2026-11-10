@@ -1,11 +1,19 @@
 # Mailroom 投遞模組規劃
 
-版本：草案 4  
-日期：2026-11-06  
-狀態：規格草案，尚未實作。已依使用者選定的方向與兩份 Phase 0 報告收斂；Claude 只讀複審與使用者審查均為 ACCEPTED（規格層級），可開始 Phase 1a。  
-基準：BAT `fbbd02d`、agent-mailroom `d1c2a51`。
+版本：草案 5  
+日期：2026-11-10（草案 4 為 2026-11-06）  
+狀態（草案 5，2026-11-10）：Mailroom Phase 1a 已有本地 commit `6a43b4b`（未 push、未進 main）；Phase 1 分成 1b-A（Mailroom 控制面與 HTTP，checkpoint A／B／C 已審，尚未 commit）與 1b-B（本文件的 B07 回補，審查中）兩張票。共同合入、schema v7 定案與日常部署都尚未核准；BAT 側（Phase 2 起）尚未實作。  
+草案 4 當時狀態（歷史基準，保留原文）：規格草案，尚未實作。已依使用者選定的方向與兩份 Phase 0 報告收斂；Claude 只讀複審與使用者審查均為 ACCEPTED（規格層級），可開始 Phase 1a。  
+基準：BAT `fbbd02d`、agent-mailroom `d1c2a51`。草案 5 另以 agent-mailroom 1a commit `6a43b4b` 加上尚未 commit 的 1b-A 實作為回補來源。
 
 **2026-11-06 本次討論結果**：採第 3 項，Phase 1 先做 (a′)，成員憑證輪替另開一張票。新模式保留以 `session_key` rebind，停用無 key 的 reconnect；存活快照移出 Phase 1。鎖與 epoch 只限制同一個 `host_id` 的投遞者，不作為舊 runtime 已結束的證明。
+
+**2026-11-10 草案 5 本次討論結果**：回補 Mailroom Phase 1a 與 1b-A 已審的實作契約，包含精確的 status 與 `detail`、DTO、CLI、schema、lifespan 及部署前置條件；不改變使用者已選定的方向，也不新增產品需求。每一項都標明出處：
+
+- **【原規格】**：草案 4 已有這項規定。
+- **【實作決定】**：1a 或 1b 實作時的決定（本次討論結果）。草案 4 原文沒有指定，不能當成原文本來如此。
+- 事實來源是 agent-mailroom 1b 工作樹（尚未 commit，位於 `6a43b4b` 之上）。`src` 與 `tests` 共 35 個 `.py` 的快照指紋以 `f3ec500349b9…` 開頭（算法：各相對路徑對應的檔案 SHA-256，排序後取 repr 再算 SHA-256；完整值見 Mailroom 1b 計畫）。程式內容改動後，須重新審受影響的契約。
+- Mailroom 的 schema v7 **仍待共同審查定案**。BAT 側（Phase 2 起）尚未實作。本文件只記錄契約與前置條件，不宣稱日常部署或任何平台已驗收；完整的遷移操作文件與演練屬 Phase 4b。
 
 探查依據：[Phase 0 報告](../../../deliverables/mailroom-phase0-20261106/report.md)、[Phase 0 補充報告](../../../deliverables/mailroom-phase0-supplement-20261106/report.md)。兩份報告均已由使用者接受；實測範圍為 macOS 15.7.9 x86_64、GUI-free headless BAT、Claude SDK 與 Rust Codex app-server。desktop、Linux 與真實對話 resume 的未驗證範圍，不能因原始碼或控制要求測試通過而視為成立。
 
@@ -187,7 +195,7 @@ router 只負責傳遞參數。模組在 claim 前可以先查一次狀態，用
 - **`binding_version`**：代表該 room 成員的通知綁定世代，跨 binding_id 單調遞增；持久保存該成員歷來最高版本，不能因刪除 binding／leave 或遷移而重設。下列三種情況建立新世代：改目標的 rebind；rejected 綁定以原 key 重新要求確認；成員沒有現存 binding 時以原 key join_room 建立綁定（包含 leave 後恢復、orphan legacy）。新版本在同一交易中設為 `max(歷來最高版本, 該成員已保存的遷移世代基準) + 1`；沒有可用版本時以 0 為基準。新成員首個綁定同樣從基準加 1。
   - 新世代一律撤銷先前世代所有通知憑證，建立 pending，並持久保存最高版本。leave 後先以同一成員 key 恢復 active，再 join_room；不讓 join_room 隱式恢復成員狀態，維持現行授權規則。
   - confirm／reject 只改狀態、不遞增版本；回傳目前版本，claim 使用該版本。pending／confirmed 下同 metadata、同目標的 join_room 重試沿用現有 binding／版本／狀態。單純重啟或 host_epoch 改變不遞增。
-- **Mailroom schema**：新增 `delivery_claims` 表，以 `claim_id` 為主鍵。欄位包含 `message_id`、`binding_id`、`binding_version`、`host_epoch`、`state`、`unknown_reason`、`send_deadline`、`report_deadline`、`notification_key_hash`、`evidence`。
+- **Mailroom schema**：新增 `delivery_claims` 表，以 `claim_id` 為對外唯一定址（草案 5：SQL 主鍵實際是 `claim_seq`，見本節回補）。欄位包含 `message_id`、`binding_id`、`binding_version`、`host_epoch`、`state`、`unknown_reason`、`send_deadline`、`report_deadline`、`notification_key_hash`、`evidence`。
   - 現有的 `notifications` 表以 `message_id` 為主鍵，無法區分多次投遞嘗試。
   - 「每位成員最多一則通知」改為以綁定為單位的**阻擋規則**：
     - 同一個綁定下，只投遞最舊的未 ack 訊息。
@@ -202,6 +210,25 @@ router 只負責傳遞參數。模組在 claim 前可以先查一次狀態，用
     - 「初次 confirm 不放行」特指遷移時轉 pending、版本不變的既有 binding；沒有 binding 的成員依新世代規則建立綁定後，confirm 可以放行。leave 後須先恢復 active。單純遷移確認、重啟或 host_epoch 更新不能放行，host_epoch 不得替代 binding_version／遷移世代。
     - 保留既有通知憑證的 hash 與授權／撤銷結果，不新發 key，也不重新啟用已撤銷的通知憑證。成員憑證不變；未曾有通知紀錄的信才適用「沒有任何 claim」的分支。
     - schema 回填須可安全重跑，不因重跑新增第二次投遞嘗試或重設阻擋。
+
+#### 草案 5 回補：claim 與 outcome 的資料規則和 HTTP 契約
+
+HTTP 請求本文若欄位缺漏、型別錯誤或多出未定義的欄位，一律由框架回 422，`detail` 是錯誤清單而不是字串；下表只列 Mailroom 自己回傳的 `detail` 字串。
+
+| 項目 | 契約 | 出處 |
+| --- | --- | --- |
+| 資料鍵 | `delivery_claims` 的 SQL 主鍵是自動遞增的 `claim_seq`；`claim_id` 是 NOT NULL UNIQUE，為對外唯一定址，BAT 只使用 `claim_id`。「最新的 claim」指同一 room、成員、訊息下 `claim_seq` 最大者。 | 草案 4 寫「以 `claim_id` 為主鍵」；改以 `claim_seq` 為主鍵是【實作決定】，對外定址不變 |
+| 世代識別 | 世代以 `room_id` 加 `member_id` 為鍵，持久保存在 `binding_generations`（`highest_version`、`migration_baseline`），不以 `binding_id` 識別。claim 保存建立當時的 `binding_id` 與 `binding_version`。 | 世代語意【原規格】；資料表與鍵【實作決定】 |
+| `POST /delivery/claims` 請求與 200 回應 | 請求：`host_epoch`（至少 1）、`binding_id`、`binding_version`（至少 0）、`message_id`（大於 0）。回應：`claim_id`、`binding_id`、`binding_version`、`room_id`、`message_id`、`send_deadline`、`report_deadline`、`prompt`；期限為 ISO 時間字串，預設 30 秒與 10 分鐘。 | 欄位與期限【原規格】；欄位範圍限制【實作決定】 |
+| claim 的 409／404 與檢查順序 | 依序：`host_not_registered`、`instance_superseded`；`binding_not_current`（找不到該 `binding_id`）；`binding_not_confirmed`；`binding_version_mismatch`；`binding_host_mismatch`（binding 的 `host_id` 不是呼叫的 host）；`member_not_active`；404 `Message not found for this binding.`；`message_acknowledged`；`message_not_oldest`；`blocked_by_previous_claim`。全部在寫入 claim 的同一交易內核對，任一失敗都不寫入 claim，也不產生通知憑證。 | 409 條件與同交易核對【原規格】；字串與順序【實作決定】 |
+| `POST /delivery/claims/{claim_id}/outcome` 請求與 200 回應 | 請求：`binding_id`、`binding_version`（至少 0）、`result`（字串）、`evidence`（選填，最長 128 字元）。請求沒有 host 欄位，多送任何欄位（包含 `host_id`）回 422。回應：`claim_id`、`binding_id`、`binding_version`、`room_id`、`message_id`、`host_id`、`host_epoch`、`state`、`unknown_reason`、`evidence`、`outcome_reported_at`、`updated_at`，不含通知憑證的 hash。 | 輸入欄位【原規格】；沒有 host 欄位與回應欄位集合【實作決定】 |
+| outcome 的檢查順序 | 依序：422 `unknown_outcome_result`（`result` 不是 `accepted`、`not_accepted`、`released`、`unknown`）；422 `released_requires_not_sent_evidence`（`released` 的 `evidence` 不是 `busy`、`busy:<原因>`、`expired`、`not_invoked`；原因限英數、底線、點、連字號，最長 64 字元）；404 `Claim not found.`；409 `claim_not_accepting_outcome`（legacy claim，先於 host 檢查）；403 `claim_host_mismatch`；409 `binding_mismatch`（`binding_id` 或 `binding_version` 不等於 claim 建立時的記錄值）；已回報過結果時，相同結果冪等回傳原紀錄，不同結果 409 `conflicting_outcome`；狀態不是 `submitting`，也不是尚未收到結果的 `report_timeout` 時，409 `claim_not_accepting_outcome`。 | 404、409、冪等與 `released` 證據限制【原規格】；字串、兩個 422、403 與順序【實作決定】 |
+| `outcome_reported_at` 與 `unknown_reason` | `outcome_reported_at` 是「已收到 runtime 結果」的唯一標記。`unknown_reason` 是歷史成因，值為 `report_timeout`、`startup_recovery`、`runtime_unknown`、`legacy`，不會隨之後的結果改寫：晚到的 `accepted` 仍保留 `report_timeout`。回報 `unknown` 而原本沒有成因時記為 `runtime_unknown`。`startup_recovery` 與 `legacy` 的 `unknown` 不接受任何回報；只有 `report_timeout` 的 `unknown` 可以再收一次結果。 | `report_timeout` 晚到改寫一次、啟動恢復不接受【原規格】；欄位語意與 `runtime_unknown`、`legacy` 成因【實作決定】 |
+| 跨 host 與同 host 舊 epoch | outcome 不帶 `host_epoch`。伺服器拿「已驗證的投遞憑證所屬 host」與「claim 建立時保存的 `host_id`」比對，不看請求本文，也不看目前 binding 的擁有者。同一個 host 即使 epoch 已被新註冊取代，仍可回報（只更新那個 claim）；另一個持有效憑證的 host 回 403 `claim_host_mismatch`，沒有資料庫、證據或通知憑證變更，也不觸發過期維護。 | 舊 instance 的 outcome 收尾例外【原規格】；403 與比對依據【實作決定】 |
+| 舊 worker 防線（第二道） | 舊模式的 `next_notification` 只看最舊的未 ack 訊息：該訊息只要有任何 `delivery_claims` 列（任何狀態，包含 `released`），就不交給舊 worker，也不跳過它去送較新的訊息；`submit_notification` 送出前會重查，因此候選讀取之後才建立的 claim 會讓舊 worker 不寫 `notifications`、不送 frame。這不代表支援新舊 worker 並行。 | 雙防線與送出前重查、「最舊訊息有 claim 就阻擋」而不跳過，都是【實作決定】（Mailroom 1b 計畫的本次討論結果；草案 4 只要求新舊 adapter 不同時投遞） |
+| 過期維護（lazy expiry） | 超過 `report_deadline` 的 `submitting` 會被改成 `unknown`／`report_timeout`（只處理 normal claim）。沒有背景工作；由 candidates、claim、outcome（delivery 路由）以及 `notification_status`（delivery 模式）的合法請求觸發，且只在授權與目標權限通過之後：candidates 要求有效 host 與目前 epoch；claim 要求目前 epoch，且 binding 存在並屬於呼叫的 host；outcome 要求 `result` 驗證通過、claim 存在並屬於呼叫的 host；status 要求成員 key 或通知憑證有效。未授權、跨 host 的請求不會寫入。維護使用獨立並提交的交易，之後該請求即使回 409，維護結果仍保留；維護不建立 claim、不撤銷通知憑證。 | 到期轉 `unknown` 而非 `released`【原規格】；觸發點、授權順序與獨立交易【實作決定】 |
+| 啟動恢復 | delivery 模式啟動時，`recover_delivery_claims` 先把所有 normal `submitting` 改成 `unknown`／`startup_recovery`，早於任何請求（也就早於第一次過期維護）。這由 server 啟動負責，BAT 不呼叫也不依賴。 | 啟動恢復不接受回報【原規格】；呼叫位置【實作決定】 |
+| legacy 回填的實際規則 | `convert_legacy_to_delivery` 可重跑。binding 的輸入只納入 `binding_state IS NULL` 者（尚未轉換），轉為 `pending`，版本取 `COALESCE(版本, 0)`，因此在 delivery 模式新建的 binding 不會在重啟時被凍結遷移基準；`notifications` 的 legacy 與 orphan 輸入仍納入。每則舊通知在 `delivery_claims` 建一筆 `origin='legacy'`、`claim_id` 為 `legacy_<message_id>` 的紀錄（每則訊息最多一筆），`submitting` 與 `unknown` 都成為 `unknown`／`legacy`，`accepted`、`not_accepted` 保留；`binding_version` 取該成員轉換當下的 `highest_version`，所以晚到的 legacy（兩次轉換之間由舊 server 新增）取當時較高的世代，只有更新的世代才會放行。找不到對應 binding 的 legacy 通知憑證在回填時直接標記已撤銷。遷移基準一經保存不重算，重跑只補上新出現的列。標記 `delivery_mode` 與轉換在同一交易，且是最後一個語句。 | legacy 阻擋、基準與可重跑【原規格】；`legacy_<message_id>`、晚到 legacy 的世代取值與「只納入 `binding_state IS NULL`」的修正【實作決定】 |
 
 ### 4. 依 runtime 判讀送出結果
 
@@ -260,6 +287,15 @@ A9 已不成立：在新 BAT 取得鎖的當下，舊 sidecar、Claude Code 或 
 
 **移出 Phase 1**：`POST /delivery/snapshots`、快照 seq／時效、workspace `complete`、快照驅動的 reconnect 條件，以及 host 關閉完成契約均不實作。A6 記錄為已知限制：profile ready 不等於 workspace complete；日後重新設計存活證明時再處理。這不免除目前 pending 確認與投遞前的逐個 terminal 本機核對；無法核對就不確認、不 claim，不從缺席推論死亡。
 
+#### 草案 5 回補：host、epoch 與無 key reconnect 的實作契約
+
+| 項目 | 契約 | 出處 |
+| --- | --- | --- |
+| 註冊 | `POST /delivery/hosts/register`：請求本文可省略；若帶 `host_id`，必須等於憑證所屬的 host，否則 403 `host_id_mismatch`。回應 `host_id`、`host_epoch`。每次註冊把該 host 的 epoch 加 1（首次為 1），並在同一交易內重新確認憑證仍是 current。 | 註冊與單調 epoch【原規格】；`host_id_mismatch` 與 DTO【實作決定】 |
+| epoch 入口 | pending 列表、confirm、reject、candidates、claim 都帶 `host_epoch`（至少 1）。host 從未註冊回 409 `host_not_registered`；epoch 不是目前值回 409 `instance_superseded`。這兩項先於所有其他檢查，失敗時沒有資料變更。outcome 沒有 epoch。 | `instance_superseded`【原規格】；`host_not_registered` 與「先於其他檢查」【實作決定】 |
+| 一個 DB 一個 host | 正式支援範圍是一個資料庫對應一個 host：首次發行只建立一個 host；registry 已有 host 但憑證檔遺失時明確拒絕，不另建 host；輪替只更新該 host 的 token。授權層仍核對 host：confirmed binding 的 `host_id`、claim 的 `host_id` 都要等於呼叫者，不因發行限制而移除。測試曾在可丟棄資料庫的 registry 直接插入第二個 host，只用來證明授權隔離，不代表支援多 host 發行或部署。 | 【實作決定】（本次討論結果，選項 a） |
+| 無 key reconnect | delivery 模式的 `POST /rooms/{room_id}/members/reconnect` 通過身分與請求本文驗證後，一律 409 `liveness_unknown`；前置錯誤為 401 `A valid identity bearer token is required.`（缺少或格式不符的 bearer）、403 `Notification credentials cannot perform this operation.`（以通知憑證呼叫，`api.py` 的成員身分 dependency 先拒絕，不會進入 `liveness_unknown`）或 422（請求本文格式）。通過驗證後，不檢查 room 或成員是否存在，不改變 members、bindings、claims、revoked_members。舊模式不變：沒有 BAT 設定時回 503 `BAT notifications are disabled; reconnect proof is unavailable.`。 | 409 `liveness_unknown`【原規格】；檢查位置在 Store 的第一個語句【實作決定】 |
+
 ### 6. 兩段式綁定
 
 成員註冊（房間、成員）維持交易原子性。通知綁定另有自己的狀態：
@@ -284,6 +320,22 @@ pending ──confirm──▶ confirmed ──（以原成員 key rebind）─�
 - 這些 join_room 呼叫就是狀態圖的重新綁定入口；recover_session 以同 key／目標呼叫 join_room 時同樣適用。回覆遺失後仍沿用原 key 重試，不輪替成員憑證。
 - terminal ID 因關分頁重開或 collision repair 改變後，agent 必須以原 key rebind；沒有 key 就適用第 5 節的限制。collision repair 發生在 renderer，目前沒有可用的 host ID 變更事件，也不會證明舊 runtime 已停止。
 
+#### 草案 5 回補：兩段式綁定的實作契約
+
+| 項目 | 契約 | 出處 |
+| --- | --- | --- |
+| pending 列表 | `GET /delivery/bindings?state=pending&host_epoch=N`：`state` 只接受 `pending`（其他值 422）。每筆回傳 `binding_id`、`binding_version`、`profile_id`、`session_id`、`runtime`、`workspace`，依 `binding_id` 排序；包含所有 pending binding（尚未確認，沒有 host 歸屬）。 | 欄位【原規格】；`profile_id` 一併回傳與排序【實作決定】 |
+| confirm、reject 請求 | `host_epoch`、`binding_version`、`observed`；`observed` 為 `profile_id`、`session_id`、`runtime`（`claude` 或 `codex`）、`preset`（1 至 64 字元）、`cwd`，多出欄位回 422。 | preset、cwd、profile【原規格】；`session_id`、`runtime` 為觀察欄位一併帶入【實作決定】 |
+| 共同的檢查順序 | epoch（`host_not_registered`、`instance_superseded`）；404 `Binding does not exist.`；409 `Binding version is not the current delivery version.`（`binding_version` 不是該 binding 目前的版本，或該 binding 不是 delivery 世代）；狀態；觀察比對。 | 版本與終態衝突回 409【原規格】；字串與順序【實作決定】 |
+| 狀態與冪等 | confirm：已 confirmed 且屬於同一 host，直接回現況，不再比對觀察；其他非 pending（已 rejected，或由另一個 host confirmed）回 409 `Binding is no longer pending.`。reject：已 rejected 直接回現況（冪等，不論本次觀察內容）；已 confirmed 回 409 `Binding is no longer pending.`。confirm、reject 都不遞增版本。 | 冪等與相反終態衝突【原規格】；細節【實作決定】 |
+| 觀察比對 | `profile_id` 或 `session_id` 與 binding 不同：409 `observation_not_for_binding`，維持 pending，不視為 mismatch。其餘依序比 `runtime`、`preset`（必須屬於該 binding 的 runtime 的 preset 集合）、`cwd`（必須等於 binding 的 `workspace`），第一個不符的欄位就是 mismatch。confirm 遇 mismatch：409 `observation_mismatch`，維持 pending，不自動 reject。reject 遇完全相符：409 `observation_matches_binding`；reject 遇 mismatch：改為 `rejected`。 | 只有已存在的同一 terminal 的明確不符才 reject、找不到或無法核對維持 pending【原規格】；三個 `observation_*` 字串與比對順序【實作決定】 |
+| `last_error` 格式與回應 | rejected 時 `last_error` 為 `observation_mismatch:<欄位>`，欄位是 `runtime`、`preset`、`cwd` 其中之一。confirm、reject 的 200 回應為 `binding_id`、`binding_version`、`binding_state`（`pending`、`confirmed`、`rejected`）、`host_id`、`reason`：confirm 成功時 `host_id` 為該 host，reject 時為 null；`reason` 只在 rejected 時取自 `last_error`。 | 顯示拒絕原因【原規格】；格式與欄位【實作決定】 |
+| `BatBinding` 新欄位 | `bat_binding` 與 `notification_status.binding` 新增選填的 `binding_state`、`binding_version`（舊模式為 null）；`host_id` 不對外。 | 顯示 `binding_state`【原規格】；欄位名稱【實作決定】 |
+| delivery 模式的註冊 | `POST /rooms`（帶 `bat`）與 `POST /rooms/{room_id}/members`（帶 `bat`）不使用 BAT adapter 驗證；Store 在註冊的同一交易內核對 metadata、workspace（須與成員 workspace 完全相同，成員不可是 left）與 terminal 占用，再建立 pending binding，任一失敗都不留下成員或 binding。pending 或 confirmed 且同目標（profile、session、workspace、runtime 皆同）：沿用現有 binding；rejected、改目標或沒有 binding：新世代，版本為 `max(歷來最高, 遷移基準) + 1`、狀態 pending，並撤銷舊世代通知憑證。相關 409：`This BAT terminal is already bound to another member in this room.`、`Binding requires an active or paused member with the exact workspace.`（left 成員在恢復 active 前會得到這則）。 | 世代規則與同目標重試【原規格】；同交易實作與字串【實作決定】 |
+| 註冊回應形狀 | `create_room` 與 `resume_session` 回傳含 `bat_binding` 的 Membership；HTTP `POST /rooms/{room_id}/members` 自 d1c2a51 起即回傳 Member、不含 binding，1b 未改。MCP bridge 的 `join_room` 工具在 POST 後會再呼叫 `GET /rooms/{room_id}/membership`（`bridge.py` 第 242–244 行），因此 agent 實際取得的註冊回傳仍含 `bat_binding` 與 `binding_state`，符合草案 4「註冊回傳與 `notification_status` 都會顯示 `binding_state`」。直接呼叫 HTTP 的用戶端需自行讀取 membership。 | 原規格；HTTP 層形狀為既有行為，本次只記錄 |
+| candidates | 只列出 binding 為 `confirmed`、`host_id` 等於呼叫 host、成員為 active，且最舊未 ack 訊息沒有被阻擋規則擋住者；回傳 `binding_id`、`binding_version`、`room_id`、`message_id`。 | pending 不列入【原規格】；其餘條件【實作決定】 |
+| preset 集合的兩份定義 | confirm／reject 使用 `agent_mailroom/store.py` 的 `RUNTIME_PRESETS`（claude：`claude-code`、`claude-code-worktree`；codex：`codex-agent`）。舊模式的目標驗證使用 `agent_mailroom/bat.py` 的 `CLAUDE_PRESETS`（第 18 行）及 `target()` 內的行內集合 `{"codex-agent"}`（第 269 行）。分成兩份是因為 `bat.py` 在匯入時需要選用依賴 websockets，delivery 模式不應依賴它。目前沒有自動檢查或共用常數保證兩者一致，列為待清理；preset 集合若變動，必須同時修改兩處。 | 【實作決定】；重複位置列為待清理 |
+
 ### 7. 身分交接與 Codex config 合併
 
 1. 為每個 session 的 Mailroom MCP bridge 注入 `BAT_AGENT_SESSION_ID`，值為該 terminal ID。bridge 在註冊時自動帶入 `bat.session_id`，不把程序共用環境當成單一 session 身分。
@@ -306,6 +358,31 @@ pending ──confirm──▶ confirmed ──（以原成員 key rebind）─�
 - **檔案遺失、無法讀取，或權限比 0600 寬鬆**：模組狀態設為 `credential_unavailable` 或 `credential_insecure`，不投遞，並顯示在診斷資訊中。
 - 投遞憑證與成員的 `session_key`、`notification_key` 完全分開，不能用來讀信或寄信。
 
+#### 草案 5 回補：投遞憑證、CLI 與授權的實作契約
+
+**delivery 路由的授權結果**（路由只在 delivery 模式掛載，舊模式沒有 `/delivery`）：
+
+| 情境 | 回應 | 出處 |
+| --- | --- | --- |
+| 沒有 Authorization 標頭，或 bearer 不符 `[A-Za-z0-9_-]{32,256}` | 401 `delivery_credential_required` | 角色分離【原規格】；status 與字串【實作決定】 |
+| 通知憑證格式（`notice_` 加 64 位小寫 hex） | 403 `delivery_credential_required` | 同上 |
+| 其他任何不是「`delivery_` 加 64 位小寫 hex，且 registry 中為 current」的 token（含成員 key、格式錯誤、registry 沒有、已撤銷） | 401 `delivery_credential_rejected`；已撤銷與不存在回同一個 `detail`，不透露是否曾經有效 | 同上 |
+| 驗證通過 | `host_id` 來自 registry，不採信請求本文 | host 身分來源【原規格】 |
+| 以 `delivery_` 格式的 token 註冊成員 | registry 中曾出現過的 hash（含已撤銷）回 403 `delivery_credential_reserved`；既有成員不受影響，從未發行過的同 prefix bearer 仍可註冊 | 【實作決定】（checkpoint A 核定，registry 分類，不是 prefix 保留字） |
+
+**憑證檔、發行與輪替**：
+
+| 項目 | 契約 | 出處 |
+| --- | --- | --- |
+| 憑證檔格式與檢查 | JSON，恰好含 `host_id`（`host_` 加 32 位小寫 hex）與 `token`（`delivery_` 加 64 位小寫 hex），不超過 4096 位元組。以不跟隨 symlink 的方式開啟，必須是一般檔案、屬於目前使用者、沒有 group 或 other 權限位元。不符時明確拒絕（例如 `Credential file permissions must be 0600 (no group/other).`），訊息不含 token。 | 檔案 0600、遺失與過寬權限不投遞【原規格】；格式、大小與逐項檢查【實作決定】 |
+| 首次發行 | `serve --delivery-host` 且檔案不存在：在同一個 `BEGIN IMMEDIATE` 交易內確認 registry 為空，寫私有暫存檔，插入 hash，以 `os.link` 連到正式檔名（檔案已出現則失敗，不覆蓋），同步目錄後才 commit；commit 前失敗只移除本次建立的檔案。registry 已有 host 但檔案不存在：明確拒絕，不重建 host（`Credential file is missing but this database already has a delivery host; its identity is not recreated automatically.`）。 | 【實作決定】 |
+| 啟動時檔案已存在 | 驗證格式，且其 hash 必須是該 host 的 current，否則啟動失敗並提示執行 `rotate-delivery-credential`。 | 【實作決定】 |
+| 輪替順序 | 先讀憑證檔取得 `host_id`（檔內 token 不必仍有效，可為已撤銷）；準備同目錄私有暫存檔；DB 交易把原 current 標為 revoked 並插入新 current，commit；再以 `os.replace` 換入檔案並同步目錄。`host_id` 與 epoch 不變。草案 4 第 8 節只定義輪替與 401 重讀行為，沒有指定 DB 與 rename 的順序，此順序是本次實作決定。 | 【實作決定】（本次討論結果） |
+| 輪替的故障分支 | 暫存檔失敗或 DB 未提交：有效 hash 與既有檔案不變，舊憑證仍可用。DB 已提交但 rename 失敗：舊 token 已失效、檔案仍舊；`rotate-delivery-credential` 以退出碼 1 回報 `rotation failed (<例外名稱>); fix the cause and rerun rotate-delivery-credential.`，修好外部問題後重跑同一命令會產生另一個新 token 並更新同一 host，不自動復活舊 token。檔案遺失、不安全或 host 不明：明確拒絕（`Credential file is missing; the host identity is not inferred or recreated.`、`Credential file names a host this database does not know.`），不自動建立新 host；資料庫檔不存在時回報 `database does not exist; nothing was changed.`，不建立資料庫。 | 401 後重讀、仍失敗才 `credential_rejected`【原規格】；其餘【實作決定】 |
+| 並行輪替的限制 | 輪替的 `os.replace` 位於 DB 交易之外。兩個 rotate 交錯時，後提交的 DB 交易使先提交者的 token 失效，但檔案可能被先提交者最後換入，使檔案持有已撤銷的 token。維運不得並行輪替；若發生，等其他 rotate 結束後明確重跑修復，不自動復活舊 token。**此交錯由原始碼推得，沒有實測。** | 【實作決定】（接受的可用性限制） |
+| CLI 旗標與預設值 | `serve --delivery-host` 是布林旗標；`--delivery-credential-file` 預設為資料庫檔同目錄的 `delivery-credential.json`，且必須搭配 `--delivery-host`（否則 argparse 錯誤，退出碼 2）；`--database` 預設 `~/.local/share/agent-mailroom/mailroom.sqlite3`；`--port` 預設 8765。`--delivery-host` 與 `--bat-url`、`--bat-fingerprint` 互斥（argparse 錯誤，退出碼 2），錯誤在任何資料庫或檔案副作用之前。`rotate-delivery-credential` 接受 `--database` 與 `--delivery-credential-file`（預設規則相同），只處理投遞憑證，不處理成員 key。 | `--delivery-host` 與舊模式二選一【原規格】；預設值與錯誤形式【實作決定】 |
+| CLI 的 symlink 規則 | 憑證路徑先 `expanduser`，只解析父目錄，最後一段原樣交給 `O_NOFOLLOW`：最後一段是 symlink（包含指向不存在目標的 dangling symlink）時拒絕，不發行、不輪替、不改動目標檔。父目錄本身是 symlink 時仍會被跟隨，不在本次範圍，也不擴大檔案系統安全模型。 | 【實作決定】（checkpoint A 後補正） |
+
 ### 9. BAT mailroom 模組的每輪流程
 
 位置在 `src-tauri/src/mailroom/`（Rust）。
@@ -321,6 +398,8 @@ pending ──confirm──▶ confirmed ──（以原成員 key rebind）─�
 9. 依第 4 節回報 outcome；instance_superseded 後仍依第 5 節完成既有 claim 的回報。回報失敗以相同內容重試至 report_deadline，不再呼叫 runtime；晚到的已知結果仍可依第 3 節回報一次。
 10. 輪詢間隔從 2 秒起，退避到最長 30 秒。
 
+【草案 5 回補，實作決定】過期維護由 Mailroom 在 candidates、claim、outcome 與 `notification_status` 的合法請求中執行，BAT 不需要也不應自行要求。沒有這些請求時，超過 `report_deadline` 的 claim 會維持 `submitting`，直到下一個合法請求或 server 重啟（重啟時一律轉為 `unknown`／`startup_recovery`）。
+
 ### 10. 遷移與相容
 
 - Mailroom 的 `serve` 二選一：舊模式（`--bat-fingerprint`）或新模式（`--delivery-host`）。兩者同時啟用時會拒絕啟動，以免重複投遞。
@@ -328,6 +407,30 @@ pending ──confirm──▶ confirmed ──（以原成員 key rebind）─�
 - 相同 terminal ID 下單純重開 BAT 不要求 reconnect；初始化遷移把既有綁定轉 pending 是一次性的模式切換措施，不能在每次重開重做。
 - 新模式保留以原 key rebind 與兩段式確認，無 key 的 reconnect 一律回 `liveness_unknown`。不讓新舊 adapter 同時投遞，也不以舊 adapter 的缺席推論替新模式放行 reconnect。
 - 確認新模式穩定後，再另開一張票移除舊 adapter。成員憑證輪替是另一張獨立票，見估算章節；本版的投遞憑證輪替（第 8 節）不等於成員 `session_key` 輪替。
+
+#### 草案 5 回補：mode、lifespan 與部署前置條件
+
+| 項目 | 契約 | 出處 |
+| --- | --- | --- |
+| mode settings | `create_app(database, bat_settings=None, delivery=None)`；`delivery` 為 `DeliverySettings(credential_file)`。兩者同時給會丟出 `ValueError`；都不給就是舊模式，保留既有呼叫方式。delivery 路由與 Store 的 delivery 行為只存在於 delivery 模式。 | 二選一【原規格】；介面形式【實作決定】 |
+| lifespan 順序（delivery 模式） | 在單一 server 檔案鎖內（取不到鎖立即失敗）：初始化 schema；`recover_delivery_claims`；`convert_legacy_to_delivery`；`ensure_credential`；開始服務。轉換失敗（例外）時啟動中止、沒有發行憑證，修正後重啟即可重跑。 | 【實作決定】（本次討論結果） |
+| lifespan 順序（舊模式） | 初始化 schema；若有 marker，在建立或刷新任何 worker 之前以 `RuntimeError` 拒絕（訊息為 `This database was converted to delivery mode; start serve with --delivery-host.`）；`recover_notifications`；依設定啟動 BAT worker。 | 防線一整體、訊息與位置都是【實作決定】（Mailroom 1b 計畫的本次討論結果） |
+| delivery 模式略過 `recover_notifications` | 轉換已把舊 `notifications` 的 `submitting` 匯入為 legacy `unknown`；舊表可保留原值，轉換後以 claim 為準，舊模式由 marker 擋下，因此不必為投遞再改舊表。舊模式的啟動恢復維持原樣。 | 【實作決定】（本次討論結果） |
+| marker | `delivery_mode` 單列表，在轉換交易的最後一個語句寫入。有 marker 就不能以舊模式啟動。 | 【實作決定】 |
+| `worker_enabled` | 沿用舊語意：只表示該 binding 目前有舊 BAT worker 在投遞。delivery 模式不建立舊 worker，所以恆為 false，不得當成 BAT 投遞模組是否運作的指標。 | 【實作決定】 |
+| schema 升級與候選 v7 | v6 升到 v7 時先備份（`<資料庫檔名去掉副檔名>.v<舊版本>-backup-<隨機值>.sqlite3`，0600）再以交易升級；已是 v7 的資料庫不再備份，只補上缺少的表與索引（`delivery_credentials`、`delivery_credentials_current_host`、`delivery_mode`）。未來若 schema 另有變動，不能把「補上缺少的物件」當成通用升級路徑。**v7 仍待共同審查定案**，不為正式資料新增自動修復或回退功能。 | 先備份再升級【原規格】；補物件行為【實作決定】 |
+| 沒有 marker 的候選資料庫 | 1a 候選 v7 已執行過轉換、卻沒有 marker 的可丟棄測試資料庫：以 delivery 模式啟動會明確重跑轉換，結果不變（不重算基準、不新增 legacy claim、不重送），並補上 marker；之後舊模式啟動會被拒絕。尚未有 marker 的資料庫以舊模式啟動仍合法，行為與舊版相同。這不是正式資料的自動修復功能。 | 【實作決定】 |
+
+**B08 bridge 相容矩陣**（只涵蓋 `notification_status` 的 DTO 契約；本版不修改 bridge 的工具說明，該部分屬 Phase 3b）：
+
+| 組合 | 結果 | 依據 |
+| --- | --- | --- |
+| 舊 bridge（d1c2a51 的 DTO）加新 server（舊模式） | 可用。回應多出三個值為 null 的欄位（`binding_version`、`unknown_reason`、`outcome_reported_at`），舊 DTO 忽略多出欄位。 | 測試以固定的 d1c2a51 DTO 副本驗證，不讀 git 歷史 |
+| 舊 bridge 加新 server（delivery 模式） | **不可用**。claim 形狀的嘗試沒有 `client_message_id`、可能是 `released`，舊 DTO 驗證失敗；無 key reconnect 也固定回 409 `liveness_unknown`。測試證明這種組合不能共用，並不是要修好它。 | 同上 |
+| 新 bridge 加新 server | 新舊兩種格式都讀得了（`client_message_id`、`queued` 與新欄位皆為選填，`state` 含 `released`）。 | 同上 |
+| 新 bridge 加舊 server（d1c2a51） | 讀得了舊格式，新欄位取預設值 null。 | 同上 |
+
+**新模式的啟用屏障**【實作決定，本次討論結果】：server 與所有長駐 bridge 都完成相容版本的更新與重啟之後，才能進行 legacy 轉換或開啟新模式。受控的部署清單必須核對 server 與每個長駐 bridge 的來源及版本。本版不新增自動 bridge inventory，也不做版本協商。日常部署與 v7 資料庫回退都需另外取得授權；本文件不宣稱已完成任何日常部署或回退演練。
 
 ## 驗證策略
 
@@ -345,7 +448,20 @@ pending ──confirm──▶ confirmed ──（以原成員 key rebind）─�
 
 ## 階段與估算
 
-0.1 pt = 1 小時實際工程量，不含會議、context switch 與等候。以下依草案 4 重新估算，尚未實作；不是把探查的實際經過時間換算成工時。單票上限 2.0 pt，不同 owner／性質分票；後續估算超過上限時必須再拆。
+0.1 pt = 1 小時實際工程量，不含會議、context switch 與等候。單票上限 2.0 pt，不同 owner／性質分票；後續估算超過上限時必須再拆。
+
+**目前核定估算（草案 5，2026-11-10 本次討論結果）**：Phase 1 已依 Mailroom 1a／1b 計畫重估並分票，取代下表 Phase 1a／1b 兩列的草案 4 原估；其他階段沿用下表。
+
+| 票 | 範圍 | 核定估算 |
+| --- | --- | --- |
+| Phase 1a Mailroom claim／outcome／schema | 本地 commit `6a43b4b` | 1.4 至 1.9 pt |
+| Phase 1b-A Mailroom 控制面與 HTTP | credential／mode／epoch、正式綁定控制面、HTTP 授權、B01–B06／B08 測試；上界由 1.4 調整為 1.45 pt。Sonnet 自報約 1.45 pt，未獨立量測，不是已驗證的實際工時 | 0.9 至 1.45 pt |
+| Phase 1b-B BAT 規格與部署條件回補 | 本文件草案 5 的 B07 回補與 B08 相容矩陣、啟用前置條件 | 0.3 至 0.5 pt |
+| **Phase 1 合計** | 三張票；比草案 4 原估 1.7 至 2.3 pt 增加 0.9 至 1.55 pt，來自補足 1b 需求低估與隔離／整合驗證，不是新增功能 | **2.6 至 3.85 pt** |
+
+待辦工程量合計因此修訂為 **7.1 至 10.25 pt**（草案 4 為 6.2 至 8.7 pt），其他條件不變。
+
+以下為草案 4 的原估與當時說明，保留作為歷史基準；其中 Phase 1a／1b 兩列與「Phase 1 合計 1.7 至 2.3 pt」已由上表取代。草案 4 當時依規格重新估算、尚未實作，不是把探查的實際經過時間換算成工時。
 
 | 階段／票 | 範圍與可審查結果 | 估算 |
 | --- | --- | --- |
@@ -410,6 +526,9 @@ P0-S 另確認 collision repair 在 renderer，沒有現成 host rekey／關閉�
 - **`unknown` 仍會卡住該成員之後的通知**：這是現有保證帶來的副作用。`released` 消除了「確定沒送進去」的那一類，但真正不明的情況仍無法自動處理。
 - **兩段式綁定改變註冊語意**：成員可能已經註冊，卻還收不到通知。
 - **單一使用者的本機信任環境**：投遞憑證只防止誤用，不防同一使用者的其他程序，這和 Mailroom 現有的前提相同。
+- **並行輪替可能讓檔案持有已撤銷 token**（草案 5）：由原始碼推得，沒有實測；維運須避免並行輪替，見第 8 節回補。
+- **preset 集合有兩份定義**（草案 5）：Mailroom 的 `store.py` 與 `bat.py` 沒有機制保證一致，列為待清理。
+- **新舊 worker 不能並行**（草案 5）：舊 worker 的防線只保證不會對已有 claim 的訊息送出，不是並行支援；啟用屏障見第 10 節回補。
 
 ## 已決事項（2026-11-06 本次討論結果）
 
@@ -423,6 +542,7 @@ P0-S 另確認 collision repair 在 renderer，沒有現成 host rekey／關閉�
 | 存活證明 | 快照、complete 與 host 關閉完成契約移出 Phase 1；鎖及 epoch 只限制投遞者。 |
 | 成員憑證輪替 | 另開獨立票，只列授權、重試／冪等性、recover_session 與相容性範圍，不混入投遞實作。 |
 | 既有授權限制 | rebind、leave 均不撤銷 session_key；舊 notification_key 失效不等於舊 runtime 失去成員權限。 |
+| 1b 實作決定（2026-11-10，本次討論結果） | registry 分類而非 prefix 保留字；單 DB 單 host；DB 先提交再 rename 的輪替順序；lazy expiry 由合法請求觸發並獨立提交；delivery 模式略過 `recover_notifications`；舊 worker 防線採「最舊訊息有 claim 就阻擋」；conversion 只納入 `binding_state IS NULL` 的 binding；這些都是實作時的決定，不是草案 4 原文，細節見第 3、5、6、8、10 節回補。 |
 
 ## 修訂紀錄
 
@@ -474,3 +594,14 @@ P0-S 另確認 collision repair 在 renderer，沒有現成 host rekey／關閉�
   14. 依 Claude 第三輪複審，補明無 binding／leave 恢復的世代建立路徑、遷移基準取值與不可重算規則；區分既有 binding 的同版本遷移確認與明確建立新世代後的確認，並新增兩種 orphan legacy 測試情境。
   15. Claude 最終只讀複審結論為 ACCEPTED；納入解除阻擋入口及 orphan legacy 測試的非阻擋措辭建議，並將現行保證與本版新增的通知世代規則分開標示。這是規格審查結果，不代表產品實作或各平台驗收通過。
   16. 使用者審查結論為 ACCEPTED（規格層級）。依非阻擋建議：claim 的 409 條件補上成員非 active，並明訂在寫入 claim 的同一交易內重新核對；Phase 1a 新增「取得 candidates 後成員才 pause」的競態測試；A9 補上取得鎖時仍為 R／T 的程序狀態證據。
+
+- **草案 5**（2026-11-10，**本次討論結果**）：回補 Mailroom 1a／1b-A 已審的實作契約，不改變使用者已選定的方向；v7 仍待共同審查定案，BAT 側未實作。
+  1. 標頭加入出處標記規則：【原規格】與【實作決定】；補明事實來源是 agent-mailroom 1b 尚未 commit 的工作樹，並記錄快照指紋前綴。
+  2. 第 3 節：`delivery_claims` 的 SQL 主鍵改記為 `claim_seq`，`claim_id` 為 NOT NULL UNIQUE 的對外定址（更正草案 4「以 `claim_id` 為主鍵」的文字）；補世代識別、claim 與 outcome 的請求與回應欄位、全部 409／404／422／403 的 `detail` 與檢查順序、`outcome_reported_at` 與 `unknown_reason` 語意、跨 host 與同 host 舊 epoch 的區分、舊 worker 防線、lazy expiry 的觸發點與授權順序、啟動恢復的呼叫位置，以及 legacy 回填的實際規則（`binding_state IS NULL`、`legacy_<message_id>`、晚到 legacy 的世代）。
+  3. 第 5 節：補 `host_id_mismatch`、`host_not_registered`、單 DB 單 host 的範圍，以及無 key reconnect 的實際行為。
+  4. 第 6 節：補 pending 列表欄位、confirm 與 reject 的請求、檢查順序、`observation_*` 三個 `detail`、`last_error` 格式、回應 DTO、`BatBinding` 新欄位、delivery 模式註冊的交易與 409、`join_room` 的 HTTP 回應形狀與 bridge 補讀 membership 的說明，以及 preset 集合兩份定義的位置與原因。
+  5. 第 8 節：補授權的 401／403 區分（已撤銷與不存在回同一 `detail`）、憑證檔格式與檢查、首次發行、輪替順序與故障分支、並行輪替限制（由原始碼推得，沒有實測）、registry 分類與既有成員相容性、CLI 旗標預設值與 symlink 規則。
+  6. 第 9 節：補過期維護不由 BAT 觸發的說明。
+  7. 第 10 節：補 mode settings、兩種模式的 lifespan 順序、marker、`worker_enabled` 的實際意義、schema 升級與沒有 marker 的候選資料庫的處理、B08 相容矩陣與新模式啟用屏障（不做自動 inventory 與版本協商；日常部署與 v7 回退另需授權）。
+  8. 風險與已決事項各補一組對應項目。本草案只記錄契約與前置條件，不含完整遷移操作文件與演練（Phase 4b）。
+  9. 依使用者審查修正：標頭改列目前階段，草案 4 的狀態標為歷史基準；快照指紋前綴更正為 `f3ec500349b9…`；估算章節新增目前核定的分票與 Phase 1 合計 2.6 至 3.85 pt，草案 4 原估保留為歷史基準；無 key reconnect 補列通知憑證的 403 前置錯誤；`join_room` 的回應形狀改為照實描述 HTTP 層與 bridge 補讀 membership，不列為差異。
